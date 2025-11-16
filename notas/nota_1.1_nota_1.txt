@@ -1,0 +1,1 @@
+hola esta es la nota número dos para verificar si mi proyecto de asistente de voz de interfaces de usuario avanzadas funciona de la manera en que debe salvar nota salvar nota
