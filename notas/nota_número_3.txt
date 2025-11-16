@@ -1,0 +1,1 @@
+hola esta es la nota número uno para ver si el proyecto de interfaces de usuario avanzadas funciona de manera correcta el proyecto consiste en un asistente de notas el cual te permite grabar notas leerlas resumirlas así mismo como mostrarlas
