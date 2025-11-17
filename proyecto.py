@@ -1,20 +1,12 @@
 import os
-os.environ["HF_HOME"] = "D:/huggingface_cache"
-
 import speech_recognition as sr
 import pyttsx3
 from transformers import pipeline
 from datetime import datetime
-import threading
 
 # ========================
 # CONFIGURACIÓN INICIAL
 # ========================
-
-# Crear carpeta de notas si no existe
-if not os.path.exists("notas"):
-    os.makedirs("notas")
-
 r = sr.Recognizer()
 r.pause_threshold = 1.5
 r.non_speaking_duration = 0.6
@@ -25,109 +17,26 @@ voz = pyttsx3.init()
 voz.setProperty('rate', 170)
 voz.setProperty('volume', 1.0)
 
-# Lock para evitar colisiones de runAndWait()
-lock_voz = threading.Lock()
-
-# ========================
-# COLA DE VOZ (SOLUCIÓN REAL)
-# ========================
-
-cola_voz = []
-
-def motor_voz():
-    """Hilo permanente encargado de hablar sin bloquear."""
-    while True:
-        if cola_voz:
-            texto = cola_voz.pop(0)
-            with lock_voz:
-                try:
-                    if voz._inLoop:
-                        voz.endLoop()
-                except:
-                    pass
-                voz.say(texto)
-                voz.runAndWait()
-
-# hilo permanente
-hilo_voz = threading.Thread(target=motor_voz, daemon=True)
-hilo_voz.start()
-
-
-def hablar(texto):
-    print("🤖:", texto)
-    cola_voz.append(texto)
-
-
-# 🔥 HABLAR INMEDIATO — sin colisiones
-def hablar_inmediato(texto):
-    print("🤖:", texto)
-    with lock_voz:
-        try:
-            if voz._inLoop:
-                voz.endLoop()
-        except:
-            pass
-        voz.stop()
-        voz.say(texto)
-        voz.runAndWait()
-
-
-def hablar_largo(texto, chunk_size=200):
-    texto = texto.strip()
-    partes = []
-
-    while len(texto) > chunk_size:
-        corte = texto.rfind(" ", 0, chunk_size)
-        if corte == -1:
-            corte = chunk_size
-        partes.append(texto[:corte])
-        texto = texto[corte:].strip()
-
-    if texto:
-        partes.append(texto)
-
-    for p in partes:
-        print("🤖:", p)
-        cola_voz.append(p)
-
-
-# ========================
-# MODELO RESUMIDOR
-# ========================
-
 print("Cargando modelo de IA, espera un momento…")
 
 summarizer = pipeline(
     "summarization",
-    model="csebuetnlp/mT5_multilingual_XLSum",
-    tokenizer="csebuetnlp/mT5_multilingual_XLSum"
+    model="google/mt5-small",
+    tokenizer="google/mt5-small"
 )
 
 print("Modelo cargado correctamente ✅")
 
-def resumir_texto(texto):
-    texto = texto.strip()
-    tokens = len(texto.split())
-
-    if tokens < 25:
-        return texto or ""
-
-    try:
-        resultado = summarizer(
-            texto,
-            max_new_tokens=80,
-            do_sample=False
-        )
-        return resultado[0]["summary_text"]
-
-    except Exception as e:
-        print("❌ Error:", e)
-        return "No pude generar el resumen."
-
+os.makedirs("notas", exist_ok=True)
 
 # ========================
-# ESCUCHA
+# FUNCIONES DE APOYO
 # ========================
+
+def hablar(texto):
+    print("🤖:", texto)
+    voz.say(texto)
+    voz.runAndWait()
 
 def escuchar():
     with sr.Microphone() as source:
@@ -140,15 +49,9 @@ def escuchar():
     except:
         return ""
 
-
 def escuchar_nota(terminaciones):
     nota = ""
-
-    # Este mensaje debe sonar sí o sí
-    hablar_inmediato(
-        "Comienza a dictar tu nota. Cuando quieras terminar, di: terminar nota, finalizar, guardar nota."
-    )
-
+    hablar("Comienza a dictar tu nota. Cuando quieras terminar, di: terminar nota, finalizar, guardar nota.")
     print("🎙️ Dictado activado...")
 
     while True:
@@ -169,18 +72,13 @@ def escuchar_nota(terminaciones):
         except:
             pass
 
-
-# ========================
-# ARCHIVOS
-# ========================
-
 def pedir_nombre_archivo():
+    """Pide al usuario que diga el nombre del archivo."""
     hablar("¿Qué nombre quieres ponerle a esta nota?")
     nombre = escuchar().strip().replace(" ", "_")
     if not nombre:
         nombre = datetime.now().strftime("nota_%Y%m%d_%H%M%S")
     return nombre
-
 
 def guardar_archivo(nombre, contenido):
     ruta = f"notas/{nombre}.txt"
@@ -188,11 +86,9 @@ def guardar_archivo(nombre, contenido):
         f.write(contenido)
     hablar(f"Archivo guardado como {nombre}")
 
-
 def listar_notas():
     archivos = os.listdir("notas")
     return [a.replace(".txt", "") for a in archivos if a.endswith(".txt")]
-
 
 def cargar_nota_por_nombre(nombre):
     ruta = f"notas/{nombre}.txt"
@@ -201,9 +97,8 @@ def cargar_nota_por_nombre(nombre):
     with open(ruta, "r", encoding="utf-8") as f:
         return f.read()
 
-
 # ========================
-# ASISTENTE PRINCIPAL
+# FUNCIONALIDAD PRINCIPAL
 # ========================
 
 def asistente():
@@ -217,7 +112,10 @@ def asistente():
 
     comandos_grabar = ["graba nota", "nueva nota", "dictar nota", "anotar algo"]
     comandos_resumen = ["resumen", "resúmelo", "resumir", "resume la nota"]
-
+    comandos_leer_nota = ["leer nota", "léela", "lee la nota"]
+    comandos_leer_resumen = ["lee el resumen", "léeme el resumen"]
+    comandos_guardar_nota = ["guardar nota", "salvar nota"]
+    comandos_guardar_resumen = ["guardar resumen", "salvar resumen"]
     comandos_ayuda = ["ayuda", "¿qué puedes hacer?", "comandos"]
     comandos_salir = ["salir", "adiós", "cerrar asistente"]
 
@@ -242,15 +140,15 @@ def asistente():
             else:
                 hablar("No pude captar la nota.")
 
-        # ---- GUARDAR NOTA ----
-        elif "guardar nota" in comando:
+        # ---- GUARDAR NOTA CON NOMBRE DEL USUARIO ----
+        elif any(c in comando for c in comandos_guardar_nota):
             if nota_actual:
                 nombre = pedir_nombre_archivo()
                 guardar_archivo(nombre, nota_actual)
             else:
                 hablar("No hay nota para guardar.")
 
-        # ---- ABRIR NOTA ----
+        # ---- LEER NOTA GUARDADA POR NOMBRE ----
         elif any(c in comando for c in comandos_cargar_nota):
             notas = listar_notas()
 
@@ -269,7 +167,7 @@ def asistente():
 
             if contenido:
                 hablar("La nota dice:")
-                hablar_largo(contenido)
+                hablar(contenido)
             else:
                 hablar("No encontré una nota con ese nombre.")
 
@@ -292,17 +190,28 @@ def asistente():
                 continue
 
             hablar("Generando el resumen, espera…")
-            resumen = resumir_texto(contenido)
+            resultado = summarizer(contenido, max_length=120, min_length=40, do_sample=False)
+
+            resumen = (
+                resultado[0].get("summary_text") or
+                resultado[0].get("generated_text") or
+                "No pude generar un resumen."
+            )
 
             hablar("Aquí está el resumen:")
-            hablar_largo(resumen)
+            hablar(resumen)
 
         # ---- RESUMIR NOTA ACTUAL ----
         elif any(c in comando for c in comandos_resumen):
             if nota_actual:
                 hablar("Generando el resumen…")
-                resumen_actual = resumir_texto(nota_actual)
-                hablar_largo(resumen_actual)
+                resultado = summarizer(nota_actual, max_length=120, min_length=40, do_sample=False)
+                resumen_actual = (
+                    resultado[0].get("summary_text") or
+                    resultado[0].get("generated_text") or
+                    "No pude generar el resumen."
+                )
+                hablar(resumen_actual)
             else:
                 hablar("Primero graba una nota.")
 
@@ -317,7 +226,6 @@ def asistente():
 
         elif comando != "":
             hablar("No entendí ese comando. Di 'ayuda' para ver opciones.")
-
 
 # ========================
 # EJECUCIÓN
