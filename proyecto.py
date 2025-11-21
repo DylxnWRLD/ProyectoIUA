@@ -410,7 +410,7 @@ def asistente():
                     nota_guardada = False
                     resumen_actual = ""
                     palabras = contar_palabras(nota_actual)
-                    hablar(f"Nota guardada en memoria. Tienes {palabras} palabras.")
+                    hablar(f"Nota guardada en memoria. Tienes {palabras} palabras. Para guardarla permanentemente di 'guaradar nota'")
                 else:
                     hablar("No se capturó contenido para la nota.")
             else:
@@ -424,7 +424,7 @@ def asistente():
                         nota_guardada = False
                         resumen_actual = ""
                         palabras = contar_palabras(nota_actual)
-                        hablar(f"Nueva nota guardada en memoria. Tienes {palabras} palabras.")
+                        hablar(f"Nueva nota guardada en memoria. Tienes {palabras} palabras. Para guardarla permanentemente di 'guaradar nota'")
                     else:
                         hablar("No se capturó contenido para la nueva nota.")
                 else:
