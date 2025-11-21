@@ -1,0 +1,4 @@
+NOTA COMPLETA (87 palabras):
+hola esta es la nota número uno del proyecto de interfaces de usuario avanzadas estamos probando la funcionalidad de grabar nota de nuestro asistente de notas posteriormente haremos una revisión de la funcionalidad de resumen pero para ello necesitamos que el contenido sea mayor a 30 palabras es por ello que estoy hablando de más también estamos probando si funciona correctamente la pausa que básicamente lo que hace es dar un tiempo para poder seguir grabando la nota a pesar de que ya se haya parado anteriormente
+
+RESUMEN: No generado

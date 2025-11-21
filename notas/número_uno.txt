@@ -1,1 +1,0 @@
-nota número uno para el proyecto interfaces de usuario avanzadas el cual es un asistente de voz que puede grabar notas leer resumir y guardar las notas
