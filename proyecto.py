@@ -1,603 +1,359 @@
 import os
 import speech_recognition as sr
 import pyttsx3
+import whisper
 import threading
 import time
-from transformers import pipeline
 from datetime import datetime
+import warnings
+import torch
+from groq import Groq
+
+# Ignorar advertencias
+warnings.filterwarnings("ignore")
 
 # ========================
-# CONFIGURACIÓN INICIAL
+# 1. CONFIGURACIÓN DE LA NUBE (GROQ)
 # ========================
-r = sr.Recognizer()
-r.pause_threshold = 1.5
-r.non_speaking_duration = 0.6
-r.energy_threshold = 300
-r.dynamic_energy_threshold = True
+API_KEY = "" 
 
-print("Cargando modelo de IA, espera un momento…")
-
-# Usar un modelo más simple y confiable para resúmenes
 try:
-    summarizer = pipeline(
-        "summarization",
-        model="Falconsai/text_summarization"
-    )
-    print("Modelo de resumen cargado correctamente ✅")
+    client = Groq(api_key=API_KEY)
+    print("☁️ Conexión a Nube (Groq) lista.")
 except Exception as e:
-    print(f"Error cargando el modelo: {e}")
-    print("Usando modelo alternativo...")
-    try:
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-    except:
-        summarizer = None
-        print("No se pudo cargar ningún modelo de resumen")
+    print(f"❌ Error conectando a Groq: {e}")
+    exit()
+
+# ========================
+# 2. CONFIGURACIÓN DEL OÍDO (WHISPER LOCAL)
+# ========================
+print("🔄 Cargando Oído (Whisper Base)...")
+
+try:
+    torch.set_num_threads(6) 
+except:
+    pass
+
+try:
+    whisper_model = whisper.load_model("base")
+    print("✅ Whisper listo. Sistema de voz activado.")
+except Exception as e:
+    print(f"Error cargando Whisper: {e}")
+    exit()
+
+r = sr.Recognizer()
+r.pause_threshold = 1.0
+r.energy_threshold = 400
+r.dynamic_energy_threshold = True
 
 os.makedirs("notas", exist_ok=True)
 
 # ========================
-# FUNCIONES DE APOYO
+# 3. FUNCIONES DE MOTOR (AUDIO Y VOZ)
 # ========================
 
-def reproducir_sonido():
-    """Reproduce un sonido para indicar que puede hablar"""
+def reproducir_sonido(tipo="inicio"):
     try:
-        # Intentar reproducir un beep simple
         import winsound
-        winsound.Beep(1000, 200)  # Frecuencia 1000Hz, duración 200ms
+        freq = 1000 if tipo == "inicio" else 500
+        winsound.Beep(freq, 200)
     except:
-        # Si no funciona en este sistema, solo imprimir
-        print("🔊 ¡Puedes hablar ahora!")
+        pass
 
 def hablar(texto):
-    """Función robusta para hablar - reinicia el motor cada vez"""
-    print("🤖:", texto)
+    print(f"🤖: {texto}")
     try:
         engine = pyttsx3.init()
-        engine.setProperty('rate', 170)
-        engine.setProperty('volume', 1.0)
+        voices = engine.getProperty('voices')
+        for voice in voices:
+            if "spanish" in voice.name.lower() or "es-es" in voice.id.lower():
+                engine.setProperty('voice', voice.id)
+                break
+        engine.setProperty('rate', 160)
         engine.say(texto)
         engine.runAndWait()
-        engine.stop()
         del engine
-    except Exception as e:
-        print(f"Error en voz: {e}")
+    except:
+        pass
 
-def escuchar():
-    """Escucha y reconoce voz del usuario"""
+def escuchar_comando():
     with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source, duration=0.8)
-        print("🎙️ Escuchando comando...")
-        # Reproducir sonido antes de escuchar
-        threading.Thread(target=reproducir_sonido).start()
+        r.adjust_for_ambient_noise(source, duration=0.5)
+        print("👂 Escuchando comando...")
         try:
-            audio = r.listen(source, timeout=10)
-        except sr.WaitTimeoutError:
-            print("⏰ Tiempo de espera agotado")
+            audio = r.listen(source, timeout=5, phrase_time_limit=5)
+            texto = r.recognize_google(audio, language="es-ES").lower()
+            print(f"🗣️ Comando: {texto}")
+            return texto
+        except:
             return ""
 
-    try:
-        texto = r.recognize_google(audio, language="es-ES").lower()
-        print(f"👤: {texto}")
-        return texto
-    except sr.UnknownValueError:
-        print("❌ No se pudo entender el audio")
-        return ""
-    except sr.RequestError as e:
-        print(f"❌ Error en el servicio: {e}")
-        return ""
-
-def escuchar_con_intentos(max_intentos=5, mensaje="Por favor, responde:"):
-    """Escucha con múltiples intentos si no se entiende"""
+def escuchar_con_intentos(max_intentos=3, mensaje="Responde:"):
     for intento in range(max_intentos):
         if intento > 0:
-            hablar(f"Intento {intento + 1} de {max_intentos}. {mensaje}")
-        
-        texto = escuchar()
-        
-        if texto and texto.strip():
-            return texto.strip()
-    
-    hablar("No pude entender tu respuesta después de varios intentos. Volviendo al menú principal.")
+            hablar(f"{mensaje}")
+        texto = escuchar_comando()
+        if texto: return texto
     return ""
 
-def escuchar_nota():
-    """Escucha continuamente y detecta comandos de terminación SIN incluirlos en la nota"""
-    nota = ""
-    hablar("Comienza a dictar tu nota. Cuando quieras terminar, di: 'terminar nota', 'finalizar' o 'guardar nota'.")
-    print("🎙️ Dictado activado...")
+# ========================
+# 4. FUNCIONES DE GRABACIÓN PRO (WHISPER)
+# ========================
 
-    terminaciones = [
-        "terminar nota",
-        "finalizar nota", 
-        "guardar nota",
-        "eso es todo",
-        "terminar",
-        "finalizar",
-        "listo"
-    ]
-
-    while True:
-        with sr.Microphone() as source:
-            r.adjust_for_ambient_noise(source, duration=0.5)
-            print("🎤 Listo para escuchar...")
-            # Sonido antes de cada segmento de dictado
-            threading.Thread(target=reproducir_sonido).start()
-            try:
-                audio = r.listen(source, timeout=15)
-            except sr.WaitTimeoutError:
-                print("⏰ Tiempo de espera en dictado")
-                continue
-
+def grabar_y_transcribir_whisper():
+    nombre_temp = "temp_dictado.wav"
+    with sr.Microphone() as source:
+        r.adjust_for_ambient_noise(source, duration=0.5)
+        hablar("Te escucho. Haz una pausa larga para terminar.")
+        threading.Thread(target=lambda: reproducir_sonido("inicio")).start()
+        print("🎙️ GRABANDO NOTA CON WHISPER (Habla natural)...")
+        
         try:
-            texto = r.recognize_google(audio, language="es-ES").lower()
-            print(f"📝: {texto}")
-
-            # Verificar si es un comando de terminación
-            if any(terminacion in texto for terminacion in terminaciones):
-                hablar("Entendido, terminando la nota.")
-                return nota.strip()
-
-            # Si no es comando de terminación, agregar a la nota
-            nota += texto + " "
-            palabras_actuales = len(nota.split())
-            print(f"📄 Nota actual: {palabras_actuales} palabras")
+            r.pause_threshold = 3.0 
+            audio_data = r.listen(source, timeout=10, phrase_time_limit=45)
             
-            # Informar cada 30 palabras
-            if palabras_actuales % 30 == 0:
-                hablar(f"Llevas {palabras_actuales} palabras. Puedes continuar o decir 'terminar nota' para finalizar.")
+            hablar("Procesando audio...")
+            print("⏳ Transcribiendo con Whisper (Local)...")
+            
+            with open(nombre_temp, "wb") as f:
+                f.write(audio_data.get_wav_data())
+            
+            r.pause_threshold = 1.0
+            
+            try:
+                resultado = whisper_model.transcribe(nombre_temp, language="es", fp16=False)
+                texto_final = resultado["text"].strip()
+                print(f"📝 Transcripción: {texto_final}")
+                if os.path.exists(nombre_temp): os.remove(nombre_temp)
+                return texto_final
+            except Exception as e:
+                print(f"Error Whisper: {e}")
+                return ""
+                
+        except sr.WaitTimeoutError:
+            hablar("No escuché nada.")
+            r.pause_threshold = 1.0
+            return ""
 
-        except sr.UnknownValueError:
-            print("❌ No se entendió en dictado")
-        except sr.RequestError as e:
-            print(f"❌ Error en servicio de dictado: {e}")
+# ========================
+# 5. INTELIGENCIA ARTIFICIAL (GROQ)
+# ========================
+
+def generar_resumen_groq(texto):
+    """Usa Groq (Llama 3) para resumir sin gastar CPU"""
+    if len(texto.split()) < 5:
+        return "Texto muy corto para resumir."
+
+    prompt = f"""
+    Actúa como un analista de texto experto. Analiza la siguiente transcripción:
+    "{texto}"
+
+    Tus instrucciones OBLIGATORIAS:
+    1. Escribe un resumen conciso del tema principal.
+    
+    2. SOBRE LAS TAREAS (Lee con cuidado):
+       - Solo extrae una lista de "TAREAS" si detectas una intención clara de acción futura real (ej: "recuérdame comprar pan", "tengo cita mañana").
+       - IGNORA COMPLETAMENTE los ejemplos hipotéticos, metáforas o situaciones que se mencionan solo para explicar un tema (ej: "cuando uno tiene que entregar un trabajo...").
+       - Si el texto es educativo, reflexivo o una historia, ASUME QUE NO HAY TAREAS.
+       
+    3. Formato de salida:
+       - Resumen: [Tu resumen aquí]
+       - TAREAS: [Lista de tareas] (SI NO HAY TAREAS REALES, OMITE ESTA SECCIÓN POR COMPLETO).
+       
+    4. Sin saludos ni charla extra.
+    """
+    
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.1
+        )
+        
+        resultado = chat_completion.choices[0].message.content
+        
+        if "TAREAS" in resultado:
+            partes = resultado.split("TAREAS")
+            if len(partes) > 1:
+                contenido_tareas = partes[1].strip().lower()
+                palabras_vacias = ["nadie", "ninguna", "no hay", "n/a", "sin tareas"]
+                if any(p in contenido_tareas for p in palabras_vacias) and len(contenido_tareas) < 50:
+                    return partes[0].strip()
+        
+        return resultado
+
+    except Exception as e:
+        return f"Error en la nube: {e}"
+
+# ========================
+# 6. FUNCIONES DE GESTIÓN DE ARCHIVOS
+# ========================
+
+def contar_palabras(texto):
+    return len(texto.split())
 
 def pedir_nombre_archivo():
-    """Pide al usuario que diga el nombre del archivo con múltiples intentos"""
-    hablar("¿Qué nombre quieres ponerle a esta nota?")
-    nombre = escuchar_con_intentos(3, "Di el nombre para la nota:")
-    
+    hablar("¿Qué nombre le pongo al archivo?")
+    nombre = escuchar_con_intentos(3, "Dime el nombre:")
     if not nombre:
         nombre = datetime.now().strftime("nota_%Y%m%d_%H%M%S")
-        hablar(f"Usando nombre automático: {nombre}")
+        hablar(f"Usando nombre automático.")
     else:
         nombre = nombre.strip().replace(" ", "_")
-    
     return nombre
-
-def seleccionar_nota_guardada():
-    """Permite seleccionar una nota guardada con múltiples intentos"""
-    notas = listar_notas()
-    
-    if not notas:
-        hablar("No tienes notas guardadas.")
-        return None
-
-    hablar("Tus notas disponibles son:")
-    for i, n in enumerate(notas[:5], 1):
-        hablar(f"{i}. {n}")
-
-    for intento in range(3):
-        if intento > 0:
-            hablar(f"Intento {intento + 1} de 3. ¿Cuál nota deseas?")
-        
-        hablar("Di el nombre completo de la nota que quieres:")
-        nombre = escuchar().replace(" ", "_")
-        
-        if nombre in notas:
-            return nombre
-        
-        # También permitir selección por número
-        if nombre.isdigit():
-            idx = int(nombre) - 1
-            if 0 <= idx < len(notas):
-                return notas[idx]
-        
-        # Búsqueda parcial
-        coincidencias = [n for n in notas if nombre in n.lower()]
-        if len(coincidencias) == 1:
-            return coincidencias[0]
-        elif len(coincidencias) > 1:
-            hablar("Encontré varias coincidencias:")
-            for n in coincidencias[:3]:
-                hablar(n)
-            continue
-    
-    hablar("No pude identificar la nota después de varios intentos.")
-    return None
 
 def guardar_archivo(nombre, contenido):
     ruta = f"notas/{nombre}.txt"
     with open(ruta, "w", encoding="utf-8") as f:
         f.write(contenido)
-    hablar(f"Archivo guardado como {nombre}")
+    hablar(f"Guardado como {nombre}")
     return ruta
 
-def listar_notas():
-    archivos = os.listdir("notas")
-    return [a.replace(".txt", "") for a in archivos if a.endswith(".txt")]
+def listar_notas_por_fecha():
+    """Lista las notas ordenadas de la MÁS NUEVA a la más vieja"""
+    ruta_dir = "notas"
+    archivos = [os.path.join(ruta_dir, f) for f in os.listdir(ruta_dir) if f.endswith(".txt")]
+    archivos.sort(key=os.path.getmtime, reverse=True)
+    return [os.path.basename(f).replace(".txt", "") for f in archivos]
 
 def cargar_nota_por_nombre(nombre):
     ruta = f"notas/{nombre}.txt"
-    if not os.path.exists(ruta):
-        return None
+    if not os.path.exists(ruta): return None
     with open(ruta, "r", encoding="utf-8") as f:
         return f.read()
 
-def contar_palabras(texto):
-    """Cuenta las palabras en un texto"""
-    return len(texto.split())
-
-def leer_nota_completa(contenido, nombre_nota):
-    """Lee una nota completa de forma optimizada"""
-    palabras = contar_palabras(contenido)
-    hablar(f"Leyendo nota completa '{nombre_nota}'. Tiene {palabras} palabras.")
+def seleccionar_nota_guardada():
+    # CAMBIO: Ahora usa la función que ordena por fecha
+    notas = listar_notas_por_fecha()
     
-    # Si es muy larga, dividir en secciones
-    if palabras > 100:
-        hablar("La nota es larga, la leeré por secciones...")
-        
-        # Dividir en párrafos u oraciones
-        lineas = contenido.split('\n')
-        secciones = []
-        
-        for linea in lineas:
-            if linea.strip():
-                # Dividir línea larga en chunks
-                palabras_linea = linea.split()
-                if len(palabras_linea) > 30:
-                    for i in range(0, len(palabras_linea), 30):
-                        chunk = " ".join(palabras_linea[i:i+30])
-                        secciones.append(chunk)
-                else:
-                    secciones.append(linea)
-        
-        # Leer secciones con pausas
-        for i, seccion in enumerate(secciones):
-            if seccion.strip():
-                hablar(seccion)
-                # Pequeña pausa entre secciones largas
-                if i < len(secciones) - 1 and len(seccion.split()) > 20:
-                    time.sleep(1)
-    else:
-        # Nota corta, leer completa
-        hablar(contenido)
-    
-    hablar("Fin de la nota.")
+    if not notas:
+        hablar("No tienes notas guardadas.")
+        return None
 
-def generar_resumen_simple(texto):
-    """Genera un resumen simple y confiable"""
-    try:
-        palabras = contar_palabras(texto)
-        
-        if palabras < 30:
-            return "La nota es demasiado corta para generar un resumen significativo."
-        
-        # Para textos cortos, usar las primeras oraciones
-        if palabras < 100:
-            oraciones = texto.split('.')
-            if len(oraciones) > 2:
-                return '. '.join(oraciones[:2]) + '.'
-            else:
-                return texto
-        
-        # Para textos más largos, dividir y tomar partes clave
-        palabras_clave = texto.split()
-        if len(palabras_clave) > 150:
-            # Tomar inicio, medio y final
-            tercio = len(palabras_clave) // 3
-            resumen_palabras = (
-                palabras_clave[:tercio//2] + 
-                palabras_clave[tercio:tercio + tercio//2] + 
-                palabras_clave[-tercio//2:]
-            )
-            return " ".join(resumen_palabras) + "..."
-        else:
-            # Para textos medianos, tomar el 60%
-            cantidad_resumen = int(len(palabras_clave) * 0.6)
-            return " ".join(palabras_clave[:cantidad_resumen]) + "..."
-            
-    except Exception as e:
-        print(f"Error generando resumen simple: {e}")
-        return "No pude generar un resumen para esta nota."
+    hablar("Tus últimas 5 notas son:")
+    for n in notas[:5]: 
+        hablar(n)
 
-def generar_resumen_ia(texto):
-    """Intenta generar resumen con IA, falla silenciosamente a resumen simple"""
-    if summarizer is None:
-        return generar_resumen_simple(texto)
+    hablar("¿Cuál quieres abrir?")
+    nombre = escuchar_comando().replace(" ", "_")
     
-    try:
-        palabras = contar_palabras(texto)
-        
-        if palabras < 30:
-            return "La nota es demasiado corta para un resumen de IA."
-        
-        # Configuración para el modelo
-        max_length = min(150, palabras // 2)
-        min_length = min(50, palabras // 4)
-        
-        resultado = summarizer(
-            texto,
-            max_length=max_length,
-            min_length=min_length,
-            do_sample=False,
-            length_penalty=2.0,
-            num_beams=4
-        )
-        
-        resumen = resultado[0].get("summary_text", "").strip()
-        
-        # Verificar si el resumen tiene sentido
-        if resumen and len(resumen.split()) >= 5:
-            return resumen
-        else:
-            return generar_resumen_simple(texto)
-            
-    except Exception as e:
-        print(f"Error en resumen IA: {e}")
-        return generar_resumen_simple(texto)
+    if nombre in notas: return nombre
+    # Búsqueda parcial mejorada
+    matches = [n for n in notas if nombre in n]
+    if len(matches) >= 1: return matches[0] # Devuelve la coincidencia más reciente
+    
+    hablar("No encontré esa nota.")
+    return None
 
 def manejar_nota_anterior(nota_actual, nota_guardada):
-    """Maneja qué hacer con una nota anterior no guardada"""
     if nota_actual and not nota_guardada:
-        palabras = contar_palabras(nota_actual)
-        hablar(f"Tienes una nota sin guardar de {palabras} palabras.")
-        hablar("¿Quieres guardarla, descartarla o continuar con ella?")
-        
-        for intento in range(3):
-            respuesta = escuchar_con_intentos(1, "Di 'guardar', 'descartar' o 'continuar':")
-            
-            if any(p in respuesta for p in ["guardar", "salvar"]):
-                nombre = pedir_nombre_archivo()
-                guardar_archivo(nombre, nota_actual)
-                hablar("Nota anterior guardada. Comenzando nueva nota...")
-                return "", True, ""  # nota_actual, nota_guardada, resumen_actual
-            elif any(p in respuesta for p in ["descartar", "eliminar", "borrar"]):
-                hablar("Nota anterior descartada. Comenzando nueva nota...")
-                return "", False, ""  # Limpiar todo
-            elif any(p in respuesta for p in ["continuar", "seguir"]):
-                hablar("Continuando con la nota actual...")
-                return nota_actual, False, ""  # Mantener nota actual
-            else:
-                hablar("No entendí tu respuesta. Por favor di 'guardar', 'descartar' o 'continuar'.")
-        
-        hablar("Volviendo al menú principal sin cambios.")
-        return nota_actual, False, ""  # Mantener estado actual
-    
-    return nota_actual, nota_guardada, ""  # No hay cambios
+        hablar("Tienes una nota sin guardar. ¿La guardo o la borro?")
+        resp = escuchar_comando()
+        if any(x in resp for x in ["guardar", "si", "sí"]):
+            nombre = pedir_nombre_archivo()
+            guardar_archivo(nombre, nota_actual)
+            return "", True, "" 
+        elif any(x in resp for x in ["borrar", "descartar", "no"]):
+            hablar("Nota descartada.")
+            return "", False, ""
+        else:
+            hablar("Manteniendo nota actual.")
+            return nota_actual, False, ""
+    return nota_actual, nota_guardada, ""
 
 # ========================
-# FUNCIONALIDAD PRINCIPAL
+# 7. BUCLE PRINCIPAL
 # ========================
 
 def asistente():
-    hablar("Hola, soy tu asistente de notas. Di 'graba nota' o 'ayuda'.")
+    hablar("Asistente Híbrido listo. Di 'graba nota', 'abrir nota' o 'ayuda'.")
 
     nota_actual = ""
     resumen_actual = ""
     nota_guardada = False
 
-    comandos_cargar_nota = ["abrir nota", "cargar nota", "nota guardada", "leer una nota guardada"]
-    comandos_resumir_guardada = ["resumir nota guardada", "resumen de nota guardada"]
-
-    comandos_grabar = ["graba nota", "nueva nota", "dictar nota", "anotar algo"]
-    comandos_resumen = ["resumen", "resúmelo", "resumir", "resume la nota"]
-    comandos_leer_nota = ["leer nota", "léela", "lee la nota"]
-    comandos_leer_resumen = ["lee el resumen", "léeme el resumen"]
-    comandos_guardar_nota = ["guardar nota", "salvar nota"]
-    comandos_guardar_resumen = ["guardar resumen", "salvar resumen"]
-    comandos_ayuda = ["ayuda", "qué puedes hacer", "comandos"]
-    comandos_salir = ["salir", "adiós", "cerrar asistente"]
+    cmd_grabar = ["graba", "nueva", "dictar"]
+    cmd_resumir = ["resumen", "resumir", "analizar"]
+    cmd_leer = ["leer", "lee la nota"]
+    cmd_guardar = ["guardar", "salvar"]
+    cmd_abrir = ["abrir", "cargar", "notas guardadas"]
+    cmd_salir = ["salir", "adiós", "terminar"]
 
     while True:
-        comando = escuchar()
-        
-        if not comando:
-            continue
+        comando = escuchar_comando()
+        if not comando: continue
 
-        # ---- GRABAR NOTA ----
-        if any(c in comando for c in comandos_grabar):
-            # Manejar nota anterior si existe
-            if nota_actual and not nota_guardada:
-                nota_actual, nota_guardada, resumen_actual = manejar_nota_anterior(nota_actual, nota_guardada)
-            
-            # Si después de manejar la nota anterior no tenemos nota (fue descartada o guardada)
-            # o si no había nota anterior, entonces grabar nueva
+        # ---- GRABAR ----
+        if any(c in comando for c in cmd_grabar):
+            nota_actual, nota_guardada, resumen_actual = manejar_nota_anterior(nota_actual, nota_guardada)
             if not nota_actual:
-                nueva_nota = escuchar_nota()
-                if nueva_nota:
-                    nota_actual = nueva_nota
+                texto_nuevo = grabar_y_transcribir_whisper()
+                if texto_nuevo:
+                    nota_actual = texto_nuevo
                     nota_guardada = False
                     resumen_actual = ""
                     palabras = contar_palabras(nota_actual)
-                    hablar(f"Nota guardada en memoria. Tienes {palabras} palabras. Para guardarla permanentemente di 'guaradar nota'")
-                else:
-                    hablar("No se capturó contenido para la nota.")
-            else:
-                # Si tenemos nota actual (usuario eligió "continuar"), preguntar si quiere reemplazar
-                hablar("Ya tienes una nota en memoria. ¿Quieres reemplazarla con una nueva?")
-                respuesta = escuchar_con_intentos(2, "Di 'sí' para reemplazar o 'no' para mantenerla:")
-                if any(p in respuesta for p in ["sí", "si", "reemplazar"]):
-                    nueva_nota = escuchar_nota()
-                    if nueva_nota:
-                        nota_actual = nueva_nota
-                        nota_guardada = False
-                        resumen_actual = ""
-                        palabras = contar_palabras(nota_actual)
-                        hablar(f"Nueva nota guardada en memoria. Tienes {palabras} palabras. Para guardarla permanentemente di 'guaradar nota'")
-                    else:
-                        hablar("No se capturó contenido para la nueva nota.")
-                else:
-                    hablar("Manteniendo la nota actual.")
+                    hablar(f"Nota capturada ({palabras} palabras).")
 
-        # ---- LEER NOTA ACTUAL ----
-        elif any(c in comando for c in comandos_leer_nota):
+        # ---- RESUMIR ----
+        elif any(c in comando for c in cmd_resumir):
             if nota_actual:
-                palabras = contar_palabras(nota_actual)
-                estado = "guardada" if nota_guardada else "sin guardar"
-                hablar(f"Esta es tu nota actual de {palabras} palabras ({estado}):")
-                if palabras > 50:
-                    hablar("Leyendo los puntos principales...")
-                    preview = " ".join(nota_actual.split()[:50]) + "..."
-                    hablar(preview)
-                else:
-                    hablar(nota_actual)
+                hablar("Consultando a la nube...")
+                resumen_actual = generar_resumen_groq(nota_actual)
+                hablar("Análisis listo:")
+                print(f"\n💡 ANÁLISIS:\n{resumen_actual}\n")
+                hablar("Te leo el resumen.")
+                solo_resumen = resumen_actual.split("TAREAS")[0]
+                hablar(solo_resumen) 
             else:
-                hablar("No hay ninguna nota en memoria. Primero graba una nota.")
+                hablar("No hay nota para resumir.")
 
-        # ---- RESUMIR NOTA ACTUAL ----
-        elif any(c in comando for c in comandos_resumen):
+        # ---- GUARDAR ----
+        elif any(c in comando for c in cmd_guardar):
             if nota_actual:
-                palabras = contar_palabras(nota_actual)
-                
-                if palabras < 20:
-                    hablar("La nota es muy corta para resumir. Necesita al menos 20 palabras.")
-                else:
-                    hablar("Generando resumen...")
-                    resumen_actual = generar_resumen_ia(nota_actual)
-                    hablar("Resumen listo:")
-                    hablar(resumen_actual)
-            else:
-                hablar("Primero graba una nota para poder resumirla.")
-
-        # ---- LEER RESUMEN ACTUAL ----
-        elif any(c in comando for c in comandos_leer_resumen):
-            if resumen_actual:
-                palabras = contar_palabras(resumen_actual)
-                hablar(f"Este es el resumen de {palabras} palabras:")
-                hablar(resumen_actual)
-            else:
-                hablar("No hay un resumen generado. Primero di 'resumen' para generar uno.")
-
-        # ---- GUARDAR NOTA ----
-        elif any(c in comando for c in comandos_guardar_nota):
-            if nota_actual:
-                if nota_guardada:
-                    hablar("Esta nota ya está guardada.")
-                    continue
-                    
-                palabras = contar_palabras(nota_actual)
-                hablar(f"Tu nota tiene {palabras} palabras.")
                 nombre = pedir_nombre_archivo()
-                contenido_completo = f"NOTA COMPLETA ({palabras} palabras):\n{nota_actual}\n\n"
-                if resumen_actual:
-                    palabras_resumen = contar_palabras(resumen_actual)
-                    contenido_completo += f"RESUMEN ({palabras_resumen} palabras):\n{resumen_actual}"
-                else:
-                    contenido_completo += "RESUMEN: No generado"
-                
-                guardar_archivo(nombre, contenido_completo)
+                contenido = f"TRANSCRIPCIÓN:\n{nota_actual}\n\nANÁLISIS (Groq):\n{resumen_actual}"
+                guardar_archivo(nombre, contenido)
                 nota_guardada = True
             else:
-                hablar("No hay nota para guardar.")
+                hablar("Nada que guardar.")
 
-        # ---- LEER NOTA GUARDADA ----
-        elif any(c in comando for c in comandos_cargar_nota):
+        # ---- LEER (MEJORADO) ----
+        elif any(c in comando for c in cmd_leer):
+            if nota_actual:
+                # CAMBIO: Limpiamos las palabras técnicas al leer
+                lectura_limpia = nota_actual.replace("TRANSCRIPCIÓN:", "").replace("ANÁLISIS (Groq):", "Resumen:")
+                hablar(lectura_limpia)
+            else:
+                hablar("La memoria está vacía.")
+
+        # ---- ABRIR (POR FECHA) ----
+        elif any(c in comando for c in cmd_abrir):
+            if nota_actual and not nota_guardada:
+                hablar("Primero guarda o descarta tu nota actual.")
+                continue
             nombre = seleccionar_nota_guardada()
-            
             if nombre:
                 contenido = cargar_nota_por_nombre(nombre)
                 if contenido:
-                    palabras = contar_palabras(contenido)
-                    hablar(f"Nota '{nombre}' cargada. Tiene {palabras} palabras.")
-                    
-                    # Preguntar si quieren reemplazar la nota actual
-                    if nota_actual and not nota_guardada:
-                        hablar("¿Quieres reemplazar tu nota actual sin guardar con esta nota guardada?")
-                        respuesta = escuchar_con_intentos(2, "Di 'sí' para reemplazar o 'no' para solo leerla:")
-                        if any(p in respuesta for p in ["sí", "si", "reemplazar"]):
-                            nota_actual = contenido
-                            nota_guardada = True
-                            resumen_actual = ""
-                            hablar("Nota actual reemplazada por la nota guardada.")
-                    
-                    # NUEVAS OPCIONES MEJORADAS
-                    hablar("¿Qué quieres hacer con esta nota?")
-                    hablar("Di 'leer nota completa' para escuchar toda la nota")
-                    hablar("O di 'generar resumen' para crear un resumen")
-                    
-                    respuesta = escuchar_con_intentos(2, "Di 'leer nota completa' o 'generar resumen':")
-                    
-                    if any(p in respuesta for p in ["leer nota completa", "leer completa", "nota completa", "leer todo"]):
-                        if palabras > 300:
-                            hablar("La nota es muy larga. ¿Estás seguro de que quieres escucharla completa?")
-                            confirmacion = escuchar_con_intentos(1, "Di 'sí' para continuar o 'no' para cancelar:")
-                            if any(p in confirmacion for p in ["sí", "si"]):
-                                leer_nota_completa(contenido, nombre)
-                            else:
-                                hablar("Entendido, cancelando lectura completa.")
-                        else:
-                            leer_nota_completa(contenido, nombre)
-                    
-                    elif any(p in respuesta for p in ["generar resumen", "hacer resumen", "resumen", "resumir"]):
-                        if palabras >= 20:
-                            hablar("Generando resumen...")
-                            resumen_temp = generar_resumen_ia(contenido)
-                            hablar("Resumen generado:")
-                            hablar(resumen_temp)
-                        else:
-                            hablar("Esta nota es muy corta para resumir.")
-                    else:
-                        hablar("No entendí tu elección. Mostrando un fragmento de la nota:")
-                        lineas = contenido.split('\n')
-                        for linea in lineas[:2]:
-                            if linea.strip() and len(linea) > 10:
-                                hablar(linea[:80] + "...")
-
-        # ---- RESUMIR NOTA GUARDADA ----
-        elif any(c in comando for c in comandos_resumir_guardada):
-            nombre = seleccionar_nota_guardada()
-            
-            if nombre:
-                contenido = cargar_nota_por_nombre(nombre)
-                if contenido:
-                    palabras = contar_palabras(contenido)
-                    if palabras < 20:
-                        hablar("Esta nota es muy corta para resumir.")
-                    else:
-                        hablar(f"Generando resumen para nota de {palabras} palabras...")
-                        resumen = generar_resumen_ia(contenido)
-                        hablar("Resumen generado:")
-                        hablar(resumen)
+                    nota_actual = contenido
+                    nota_guardada = True
+                    resumen_actual = "" 
+                    hablar(f"Nota '{nombre}' cargada.")
 
         # ---- AYUDA ----
-        elif any(c in comando for c in comandos_ayuda):
-            mensajes_ayuda = [
-                "Puedo ayudarte con:",
-                "Grabar notas - di 'graba nota'",
-                "Leer nota actual - di 'lee la nota'",  
-                "Generar resumen - di 'resumen'",
-                "Guardar nota - di 'guardar nota'",
-                "Abrir notas - di 'abrir nota'",
-                "Salir - di 'salir'"
-            ]
-            
-            for mensaje in mensajes_ayuda:
-                hablar(mensaje)
+        elif "ayuda" in comando:
+            hablar("Comandos: Graba nota, Resumen, Guardar, Abrir nota (busca las más recientes), Salir.")
 
         # ---- SALIR ----
-        elif any(c in comando for c in comandos_salir):
+        elif any(c in comando for c in cmd_salir):
             if nota_actual and not nota_guardada:
-                palabras = contar_palabras(nota_actual)
-                hablar(f"Tienes una nota sin guardar de {palabras} palabras.")
-                respuesta = escuchar_con_intentos(2, "¿Quieres guardarla antes de salir? Di 'sí' o 'no':")
-                if any(p in respuesta for p in ["sí", "si"]):
-                    nombre = pedir_nombre_archivo()
-                    guardar_archivo(nombre, nota_actual)
-            
-            hablar("Hasta luego. Fue un placer ayudarte.")
+                hablar("Nota sin guardar. ¿Salir igual?")
+                resp = escuchar_comando()
+                if "si" not in resp and "sí" not in resp:
+                    continue
+            hablar("Apagando.")
             break
 
-        else:
-            hablar("No entendí ese comando. Di 'ayuda' para ver opciones.")
-
-# ========================
-# EJECUCIÓN
-# ========================
 if __name__ == "__main__":
-    try:
-        asistente()
-    except KeyboardInterrupt:
-        print("\n👋 Programa interrumpido por el usuario")
-    except Exception as e:
-        print(f"❌ Error crítico: {e}")
+    asistente()
