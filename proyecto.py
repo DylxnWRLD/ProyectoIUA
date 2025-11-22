@@ -106,14 +106,14 @@ def grabar_y_transcribir_whisper():
         r.adjust_for_ambient_noise(source, duration=0.5)
         hablar("Te escucho. Haz una pausa larga para terminar.")
         threading.Thread(target=lambda: reproducir_sonido("inicio")).start()
-        print("🎙️ GRABANDO NOTA CON WHISPER (Habla natural)...")
+        print("🎙️ GRABANDO NOTA (Habla natural)...")
         
         try:
             r.pause_threshold = 3.0 
-            audio_data = r.listen(source, timeout=10, phrase_time_limit=45)
+            audio_data = r.listen(source, timeout=10, phrase_time_limit=None)
             
             hablar("Procesando audio...")
-            print("⏳ Transcribiendo con Whisper (Local)...")
+            print("⏳ Transcribiendo...")
             
             with open(nombre_temp, "wb") as f:
                 f.write(audio_data.get_wav_data())
@@ -192,6 +192,21 @@ def generar_resumen_groq(texto):
 def contar_palabras(texto):
     return len(texto.split())
 
+def convertir_texto_a_numero(texto):
+    """Convierte palabras comunes de números a dígitos para la selección"""
+    mapping = {
+        "uno": 1, "una": 1, "primera": 1, "primero": 1, "1": 1,
+        "dos": 2, "segunda": 2, "segundo": 2, "2": 2,
+        "tres": 3, "tercera": 3, "tercero": 3, "3": 3,
+        "cuatro": 4, "cuarta": 4, "4": 4,
+        "cinco": 5, "quinta": 5, "5": 5
+    }
+    # Buscamos si alguna palabra del texto es un número
+    for palabra in texto.split():
+        if palabra in mapping:
+            return mapping[palabra]
+    return None
+
 def pedir_nombre_archivo():
     hablar("¿Qué nombre le pongo al archivo?")
     nombre = escuchar_con_intentos(3, "Dime el nombre:")
@@ -223,26 +238,49 @@ def cargar_nota_por_nombre(nombre):
         return f.read()
 
 def seleccionar_nota_guardada():
-    # CAMBIO: Ahora usa la función que ordena por fecha
     notas = listar_notas_por_fecha()
     
     if not notas:
         hablar("No tienes notas guardadas.")
         return None
 
-    hablar("Tus últimas 5 notas son:")
-    for n in notas[:5]: 
-        hablar(n)
+    hablar("Tus últimas notas son:")
+    # Listamos las notas
+    for i, n in enumerate(notas[:5], 1):
+        nombre_limpio = n.replace("_", " ").replace(".txt", "")
+        hablar(f"Número {i}: {nombre_limpio}")
 
-    hablar("¿Cuál quieres abrir?")
-    nombre = escuchar_comando().replace(" ", "_")
-    
-    if nombre in notas: return nombre
-    # Búsqueda parcial mejorada
-    matches = [n for n in notas if nombre in n]
-    if len(matches) >= 1: return matches[0] # Devuelve la coincidencia más reciente
-    
-    hablar("No encontré esa nota.")
+    hablar("¿Cuál quieres abrir? Di el número o el nombre (ejemplo: 'la uno' o 'numero uno').")
+
+    # --- BUCLE DE INTENTOS (AQUÍ ESTÁ LA SOLUCIÓN) ---
+    for intento in range(3): # Te dará 3 oportunidades
+        comando = escuchar_comando().lower()
+        
+        if not comando:
+            # Si no escuchó nada, te avisa y vuelve a intentar
+            if intento < 2: # Solo habla si le quedan intentos
+                hablar("No te escuché. Di el número de nuevo.")
+            continue
+
+        # ESTRATEGIA 1: Selección por Número (Ej: "la tres")
+        indice = convertir_texto_a_numero(comando)
+        if indice and 1 <= indice <= len(notas):
+            nota_elegida = notas[indice - 1]
+            hablar(f"Abriendo la nota {indice}...")
+            return nota_elegida
+
+        # ESTRATEGIA 2: Búsqueda por Nombre
+        comando_limpio = comando.replace(" ", "").replace("_", "")
+        for nota in notas:
+            nota_limpia = nota.lower().replace("_", "").replace(" ", "")
+            if comando_limpio in nota_limpia or nota_limpia in comando_limpio:
+                return nota
+        
+        # Si escuchó algo pero no coincide
+        if intento < 2:
+            hablar("No entendí cuál. Intenta decir solo el número (ej: 'dos').")
+
+    hablar("No seleccionaste ninguna nota. Volviendo al inicio.")
     return None
 
 def manejar_nota_anterior(nota_actual, nota_guardada):
@@ -343,7 +381,7 @@ def asistente():
 
         # ---- AYUDA ----
         elif "ayuda" in comando:
-            hablar("Comandos: Graba nota, Resumen, Guardar, Abrir nota (busca las más recientes), Salir.")
+            hablar("Comandos: Graba nota, Resumen, Guardar, Abrir nota, Salir.")
 
         # ---- SALIR ----
         elif any(c in comando for c in cmd_salir):
