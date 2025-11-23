@@ -4,6 +4,7 @@ import pyttsx3
 import whisper
 import threading
 import time
+import queue # <--- IMPORTANTE: Necesario para la comunicación entre hilos
 from datetime import datetime
 import warnings
 import torch
@@ -27,7 +28,7 @@ except Exception as e:
 # ========================
 # 2. CONFIGURACIÓN DEL OÍDO (WHISPER LOCAL)
 # ========================
-print("🔄 Cargando Oído (Whisper Base)...")
+print("🔄 Cargando Oído (Whisper Small)...")
 
 try:
     torch.set_num_threads(6) 
@@ -35,7 +36,7 @@ except:
     pass
 
 try:
-    whisper_model = whisper.load_model("base")
+    whisper_model = whisper.load_model("small")
     print("✅ Whisper listo. Sistema de voz activado.")
 except Exception as e:
     print(f"Error cargando Whisper: {e}")
@@ -77,6 +78,7 @@ def hablar(texto):
         pass
 
 def escuchar_comando():
+    """Escucha comandos cortos (Google)"""
     with sr.Microphone() as source:
         r.adjust_for_ambient_noise(source, duration=0.5)
         print("👂 Escuchando comando...")
@@ -97,43 +99,144 @@ def escuchar_con_intentos(max_intentos=3, mensaje="Responde:"):
     return ""
 
 # ========================
-# 4. FUNCIONES DE GRABACIÓN PRO (WHISPER)
+# 4. FUNCIONES DE GRABACIÓN PRO (MULTIHILO REAL)
 # ========================
 
 def grabar_y_transcribir_whisper():
-    nombre_temp = "temp_dictado.wav"
+    """
+    SISTEMA MULTIHILO (PRODUCER-CONSUMER) MEJORADO:
+    - Detecta más comandos de salida.
+    - Filtra repeticiones (alucinaciones).
+    """
+    
+    # Colas y banderas de control
+    cola_audio = queue.Queue()
+    evento_parar = threading.Event() 
+    resultado_final = {"texto": ""}
+    
+    # --- CONFIGURACIÓN ANTI-FALLOS ---
+    ALUCINACIONES = [
+        "suscríbete", "subtítulos", "amara.org", "al canal", "dale like", 
+        "gracias por ver", "copyright", "transcripción", "traducido por",
+        "editado por"
+    ]
+    
+    # Agregamos más variantes para que te entienda sí o sí
+    PALABRAS_FIN = [
+        "terminar nota", "finalizar nota", "guardar nota", 
+        "fin de la nota", "fin de la grabación", "detener grabación",
+        "hasta aquí", "cierra la nota", "basta de grabar",
+        "ya es todo", "punto final", "Finalizó la nota"
+    ]
+
+    print("🤫 CALIBRANDO RUIDO...")
     with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source, duration=0.5)
-        hablar("Te escucho. Haz una pausa larga para terminar.")
-        threading.Thread(target=lambda: reproducir_sonido("inicio")).start()
-        print("🎙️ GRABANDO NOTA (Habla natural)...")
+        r.adjust_for_ambient_noise(source, duration=1.0)
+        r.energy_threshold = max(300, r.energy_threshold * 1.1)
+
+    # ---------------------------------------------------------
+    # HILO 1: EL OÍDO (Productor)
+    # ---------------------------------------------------------
+    def hilo_escucha():
+        with sr.Microphone() as source:
+            while not evento_parar.is_set():
+                try:
+                    # phrase_time_limit=8 para enviar paquetes más rápido
+                    audio = r.listen(source, timeout=2, phrase_time_limit=8)
+                    cola_audio.put(audio) 
+                    print("🎤 ...", end="\r")
+                except sr.WaitTimeoutError:
+                    pass 
+                except Exception as e:
+                    if not evento_parar.is_set(): print(f"Error Oído: {e}")
+
+    # ---------------------------------------------------------
+    # HILO 2: EL CEREBRO (Consumidor)
+    # ---------------------------------------------------------
+    def hilo_procesamiento():
+        nombre_temp = "temp_bloque.wav"
+        ultimo_texto_procesado = "" # Variable para detectar bucles de repetición
         
-        try:
-            r.pause_threshold = 3.0 
-            audio_data = r.listen(source, timeout=10, phrase_time_limit=None)
-            
-            hablar("Procesando audio...")
-            print("⏳ Transcribiendo...")
-            
-            with open(nombre_temp, "wb") as f:
-                f.write(audio_data.get_wav_data())
-            
-            r.pause_threshold = 1.0
-            
+        while not evento_parar.is_set() or not cola_audio.empty():
             try:
-                resultado = whisper_model.transcribe(nombre_temp, language="es", fp16=False)
-                texto_final = resultado["text"].strip()
-                print(f"📝 Transcripción: {texto_final}")
-                if os.path.exists(nombre_temp): os.remove(nombre_temp)
-                return texto_final
-            except Exception as e:
-                print(f"Error Whisper: {e}")
-                return ""
+                audio_data = cola_audio.get(timeout=1) 
+            except queue.Empty:
+                continue
+
+            try:
+                with open(nombre_temp, "wb") as f:
+                    f.write(audio_data.get_wav_data())
+
+                contexto = resultado_final["texto"][-200:] if resultado_final["texto"] else "Español."
                 
-        except sr.WaitTimeoutError:
-            hablar("No escuché nada.")
-            r.pause_threshold = 1.0
-            return ""
+                res = whisper_model.transcribe(
+                    nombre_temp, language="es", fp16=False, initial_prompt=contexto,
+                    condition_on_previous_text=False, # Vital para evitar bucles
+                    no_speech_threshold=0.6
+                )
+                texto = res["text"].strip()
+                
+                # --- FILTROS DE LIMPIEZA ---
+                
+                # 1. Si está vacío o es muy corto
+                if not texto or len(texto) < 2: continue
+
+                # 2. Filtro de Alucinaciones (YouTube)
+                if any(aluc in texto.lower() for aluc in ALUCINACIONES):
+                    continue
+
+                # 3. FILTRO DE REPETICIÓN
+                # Si el texto es igual al anterior, es una alucinación de Whisper. Lo ignoramos.
+                if texto.lower() == ultimo_texto_procesado.lower():
+                    continue
+                ultimo_texto_procesado = texto # Actualizamos memoria
+
+                print(f"➕ {texto}")
+
+                # 4. DETECCIÓN DE FIN (Más flexible)
+                texto_lower = texto.lower().replace(".", "").replace(",", "")
+                encontrado_fin = False
+                
+                for cmd in PALABRAS_FIN:
+                    if cmd in texto_lower:
+                        idx = texto_lower.find(cmd)
+                        parte_util = texto[:idx]
+                        
+                        if len(parte_util) > 2:
+                            resultado_final["texto"] += " " + parte_util
+                        
+                        hablar("Oído, terminando...")
+                        evento_parar.set() 
+                        
+                        with cola_audio.mutex: cola_audio.queue.clear()
+                        return
+
+                resultado_final["texto"] += " " + texto
+
+            except Exception as e:
+                print(f"Error Cerebro: {e}")
+            finally:
+                cola_audio.task_done()
+        
+        if os.path.exists(nombre_temp): os.remove(nombre_temp)
+
+    # ---------------------------------------------------------
+    # EJECUCIÓN
+    # ---------------------------------------------------------
+    hablar("Te escucho. Habla fluido. Di 'terminar nota' o 'listo' cuando quieras finalizar la nota.")
+    threading.Thread(target=lambda: reproducir_sonido("inicio")).start()
+
+    t_oido = threading.Thread(target=hilo_escucha)
+    t_cerebro = threading.Thread(target=hilo_procesamiento)
+    
+    t_oido.start()
+    t_cerebro.start()
+
+    t_cerebro.join()
+    evento_parar.set()
+    t_oido.join()
+
+    return resultado_final["texto"].strip()
 
 # ========================
 # 5. INTELIGENCIA ARTIFICIAL (GROQ)
@@ -203,8 +306,9 @@ def convertir_texto_a_numero(texto):
     }
     # Buscamos si alguna palabra del texto es un número
     for palabra in texto.split():
-        if palabra in mapping:
-            return mapping[palabra]
+        palabra_limpia = palabra.replace(".", "").replace(",", "")
+        if palabra_limpia in mapping:
+            return mapping[palabra_limpia]
     return None
 
 def pedir_nombre_archivo():
@@ -250,19 +354,16 @@ def seleccionar_nota_guardada():
         nombre_limpio = n.replace("_", " ").replace(".txt", "")
         hablar(f"Número {i}: {nombre_limpio}")
 
-    hablar("¿Cuál quieres abrir? Di el número o el nombre (ejemplo: 'la uno' o 'numero uno').")
+    hablar("¿Cuál quieres abrir? Di el número o el nombre.")
 
-    # --- BUCLE DE INTENTOS (AQUÍ ESTÁ LA SOLUCIÓN) ---
-    for intento in range(3): # Te dará 3 oportunidades
+    for intento in range(3): 
         comando = escuchar_comando().lower()
         
         if not comando:
-            # Si no escuchó nada, te avisa y vuelve a intentar
-            if intento < 2: # Solo habla si le quedan intentos
-                hablar("No te escuché. Di el número de nuevo.")
+            if intento < 2: hablar("No te escuché. Di el número de nuevo.")
             continue
 
-        # ESTRATEGIA 1: Selección por Número (Ej: "la tres")
+        # ESTRATEGIA 1: Selección por Número
         indice = convertir_texto_a_numero(comando)
         if indice and 1 <= indice <= len(notas):
             nota_elegida = notas[indice - 1]
@@ -276,7 +377,6 @@ def seleccionar_nota_guardada():
             if comando_limpio in nota_limpia or nota_limpia in comando_limpio:
                 return nota
         
-        # Si escuchó algo pero no coincide
         if intento < 2:
             hablar("No entendí cuál. Intenta decir solo el número (ej: 'dos').")
 
@@ -304,7 +404,7 @@ def manejar_nota_anterior(nota_actual, nota_guardada):
 # ========================
 
 def asistente():
-    hablar("Asistente Híbrido listo. Di 'graba nota', 'abrir nota' o 'ayuda'.")
+    hablar("Asistente de notas listo. Di 'graba nota', 'abrir nota' o 'ayuda'.")
 
     nota_actual = ""
     resumen_actual = ""
@@ -356,10 +456,9 @@ def asistente():
             else:
                 hablar("Nada que guardar.")
 
-        # ---- LEER (MEJORADO) ----
+        # ---- LEER ----
         elif any(c in comando for c in cmd_leer):
             if nota_actual:
-                # CAMBIO: Limpiamos las palabras técnicas al leer
                 lectura_limpia = nota_actual.replace("TRANSCRIPCIÓN:", "").replace("ANÁLISIS (Groq):", "Resumen:")
                 hablar(lectura_limpia)
             else:
